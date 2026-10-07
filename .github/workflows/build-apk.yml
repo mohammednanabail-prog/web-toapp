@@ -1,0 +1,119 @@
+name: Build Android APK
+on: [push, workflow_dispatch]
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          java-version: '17'
+          distribution: 'temurin'
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Detect project type
+        id: detect
+        run: |
+          echo "=== Files in root ==="
+          ls -la
+          find . -maxdepth 4 -name "gradlew" -o -name "build.gradle" -o -name "build.gradle.kts" -o -name "settings.gradle" -o -name "settings.gradle.kts" -o -name "package.json" -not -path "*/node_modules/*" -print
+          HAS_PKG=0
+          HAS_RN=0
+          HAS_GRADLE_FILES=0
+          if [ -f "package.json" ]; then HAS_PKG=1; fi
+          if [ "$HAS_PKG" = "1" ] && grep -qE '"(expo|react-native)"' package.json; then HAS_RN=1; fi
+          if find . -maxdepth 4 -name "gradlew" -not -path "*/node_modules/*" | grep -q .; then HAS_GRADLE_FILES=1; fi
+          if find . -maxdepth 4 -name "build.gradle" -not -path "*/node_modules/*" | grep -q .; then HAS_GRADLE_FILES=1; fi
+          if find . -maxdepth 4 -name "build.gradle.kts" -not -path "*/node_modules/*" | grep -q .; then HAS_GRADLE_FILES=1; fi
+          if find . -maxdepth 4 -name "settings.gradle" -not -path "*/node_modules/*" | grep -q .; then HAS_GRADLE_FILES=1; fi
+          if [ "$HAS_PKG" = "1" ] && [ "$HAS_RN" = "1" ]; then
+            echo "type=rn" >> $GITHUB_OUTPUT
+          elif [ "$HAS_GRADLE_FILES" = "1" ]; then
+            echo "type=native" >> $GITHUB_OUTPUT
+          else
+            echo "type=unknown" >> $GITHUB_OUTPUT
+            exit 1
+          fi
+
+      - name: Install React Native dependencies
+        if: steps.detect.outputs.type == 'rn'
+        run: |
+          npm install --legacy-peer-deps --no-audit --no-fund
+          npx expo install expo-image-picker expo-print expo-sharing expo-linear-gradient expo-document-picker -- --legacy-peer-deps
+          npm install jszip --legacy-peer-deps --no-audit --no-fund
+
+      - name: RN - Run expo prebuild
+        if: steps.detect.outputs.type == 'rn'
+        run: npx expo prebuild --platform android --no-install --clean
+
+      - name: RN - Create debug keystore
+        if: steps.detect.outputs.type == 'rn'
+        run: |
+          if [ ! -f "android/app/debug.keystore" ]; then
+            keytool -genkeypair -v -storetype PKCS12 -keystore android/app/debug.keystore -alias androiddebugkey -keyalg RSA -keysize 2048 -validity 10000 -storepass android -keypass android -dname "CN=Android Debug,O=Android,C=US"
+          fi
+
+      - name: RN - Build Release APK
+        if: steps.detect.outputs.type == 'rn'
+        run: |
+          cd android
+          chmod +x gradlew
+          ./gradlew assembleRelease --stacktrace --no-daemon
+
+      - name: Native Android - Locate project
+        if: steps.detect.outputs.type == 'native'
+        id: locate
+        run: |
+          if [ -f "gradlew" ] && { [ -f "build.gradle" ] || [ -f "build.gradle.kts" ] || [ -f "settings.gradle" ] || [ -f "settings.gradle.kts" ]; }; then
+            DIR="."
+          else
+            GRADLE_FILE=$(find . -maxdepth 4 \( -name "settings.gradle" -o -name "settings.gradle.kts" -o -name "build.gradle" -o -name "build.gradle.kts" \) -not -path "*/node_modules/*" | head -n 1)
+            if [ -z "$GRADLE_FILE" ]; then exit 1; fi
+            DIR=$(dirname "$GRADLE_FILE")
+          fi
+          echo "dir=$DIR" >> $GITHUB_OUTPUT
+
+      - name: Native Android - Generate Gradle wrapper if missing
+        if: steps.detect.outputs.type == 'native'
+        run: |
+          cd "${{ steps.locate.outputs.dir }}"
+          if [ ! -f "gradlew" ]; then
+            gradle wrapper --gradle-version 8.7 --distribution-type bin
+          fi
+          chmod +x gradlew
+
+      - name: Native Android - Build Debug APK
+        if: steps.detect.outputs.type == 'native'
+        run: |
+          cd "${{ steps.locate.outputs.dir }}"
+          ./gradlew assembleDebug --stacktrace --no-daemon
+
+      - name: Upload APK Artifact
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: app-apk
+          path: '**/build/outputs/apk/**/*.apk'
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v2
+        if: success()
+        with:
+          tag_name: build-${{ github.run_number }}
+          name: 'APK Build #${{ github.run_number }}'
+          files: '**/build/outputs/apk/**/*.apk'
+          draft: false
+          prerelease: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
