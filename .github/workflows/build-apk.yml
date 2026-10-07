@@ -27,22 +27,32 @@ jobs:
         run: |
           echo "=== Files in root ==="
           ls -la
-          find . -maxdepth 4 -name "gradlew" -o -name "build.gradle" -o -name "build.gradle.kts" -o -name "settings.gradle" -o -name "settings.gradle.kts" -o -name "package.json" -not -path "*/node_modules/*" -print
+          echo "=== All gradle-related files (excluding node_modules) ==="
+          find . -not -path "*/node_modules/*" -type f \( -name "settings.gradle" -o -name "settings.gradle.kts" -o -name "build.gradle" -o -name "build.gradle.kts" -o -name "gradlew" -o -name "package.json" \) -print 2>/dev/null || true
+
           HAS_PKG=0
           HAS_RN=0
           HAS_GRADLE_FILES=0
+
           if [ -f "package.json" ]; then HAS_PKG=1; fi
           if [ "$HAS_PKG" = "1" ] && grep -qE '"(expo|react-native)"' package.json; then HAS_RN=1; fi
-          if find . -maxdepth 4 -name "gradlew" -not -path "*/node_modules/*" | grep -q .; then HAS_GRADLE_FILES=1; fi
-          if find . -maxdepth 4 -name "build.gradle" -not -path "*/node_modules/*" | grep -q .; then HAS_GRADLE_FILES=1; fi
-          if find . -maxdepth 4 -name "build.gradle.kts" -not -path "*/node_modules/*" | grep -q .; then HAS_GRADLE_FILES=1; fi
-          if find . -maxdepth 4 -name "settings.gradle" -not -path "*/node_modules/*" | grep -q .; then HAS_GRADLE_FILES=1; fi
+          if find . -not -path "*/node_modules/*" -name "settings.gradle" | grep -q .; then HAS_GRADLE_FILES=1; fi
+          if find . -not -path "*/node_modules/*" -name "settings.gradle.kts" | grep -q .; then HAS_GRADLE_FILES=1; fi
+          if find . -not -path "*/node_modules/*" -name "build.gradle" | grep -q .; then HAS_GRADLE_FILES=1; fi
+          if find . -not -path "*/node_modules/*" -name "build.gradle.kts" | grep -q .; then HAS_GRADLE_FILES=1; fi
+          if find . -not -path "*/node_modules/*" -name "gradlew" | grep -q .; then HAS_GRADLE_FILES=1; fi
+
+          echo "HAS_PKG=$HAS_PKG HAS_RN=$HAS_RN HAS_GRADLE_FILES=$HAS_GRADLE_FILES"
+
           if [ "$HAS_PKG" = "1" ] && [ "$HAS_RN" = "1" ]; then
             echo "type=rn" >> $GITHUB_OUTPUT
+            echo "Detected React Native / Expo project"
           elif [ "$HAS_GRADLE_FILES" = "1" ]; then
             echo "type=native" >> $GITHUB_OUTPUT
+            echo "Detected Native Android (Gradle) project"
           else
             echo "type=unknown" >> $GITHUB_OUTPUT
+            echo "No buildable project found"
             exit 1
           fi
 
@@ -61,7 +71,13 @@ jobs:
         if: steps.detect.outputs.type == 'rn'
         run: |
           if [ ! -f "android/app/debug.keystore" ]; then
-            keytool -genkeypair -v -storetype PKCS12 -keystore android/app/debug.keystore -alias androiddebugkey -keyalg RSA -keysize 2048 -validity 10000 -storepass android -keypass android -dname "CN=Android Debug,O=Android,C=US"
+            keytool -genkeypair -v \
+              -storetype PKCS12 \
+              -keystore android/app/debug.keystore \
+              -alias androiddebugkey \
+              -keyalg RSA -keysize 2048 -validity 10000 \
+              -storepass android -keypass android \
+              -dname "CN=Android Debug,O=Android,C=US"
           fi
 
       - name: RN - Build Release APK
@@ -71,32 +87,59 @@ jobs:
           chmod +x gradlew
           ./gradlew assembleRelease --stacktrace --no-daemon
 
-      - name: Native Android - Locate project
+      # ⭐ التعديل الأساسي: البحث الذكي عن جذر المشروع
+      - name: Native Android - Locate project root
         if: steps.detect.outputs.type == 'native'
         id: locate
         run: |
-          if [ -f "gradlew" ] && { [ -f "build.gradle" ] || [ -f "build.gradle.kts" ] || [ -f "settings.gradle" ] || [ -f "settings.gradle.kts" ]; }; then
-            DIR="."
+          # الأولوية 1: settings.gradle — موجود فقط في جذر المشروع
+          SETTINGS_FILE=$(find . -not -path "*/node_modules/*" -type f \( -name "settings.gradle" -o -name "settings.gradle.kts" \) 2>/dev/null | head -n 1)
+          if [ -n "$SETTINGS_FILE" ]; then
+            DIR=$(dirname "$SETTINGS_FILE")
+            echo "Found settings.gradle: $SETTINGS_FILE"
           else
-            GRADLE_FILE=$(find . -maxdepth 4 \( -name "settings.gradle" -o -name "settings.gradle.kts" -o -name "build.gradle" -o -name "build.gradle.kts" \) -not -path "*/node_modules/*" | head -n 1)
-            if [ -z "$GRADLE_FILE" ]; then exit 1; fi
-            DIR=$(dirname "$GRADLE_FILE")
+            # الأولوية 2: gradlew
+            GRADLEW_FILE=$(find . -not -path "*/node_modules/*" -type f -name "gradlew" 2>/dev/null | head -n 1)
+            if [ -n "$GRADLEW_FILE" ]; then
+              DIR=$(dirname "$GRADLEW_FILE")
+              echo "Found gradlew: $GRADLEW_FILE"
+            else
+              # الأولوية 3: build.gradle في الجذر (بدون كلمة app/)
+              BUILD_FILE=$(find . -not -path "*/node_modules/*" -not -path "*/app/*" -type f -name "build.gradle" 2>/dev/null | head -n 1)
+              if [ -z "$BUILD_FILE" ]; then
+                BUILD_FILE=$(find . -not -path "*/node_modules/*" -type f -name "build.gradle" 2>/dev/null | head -n 1)
+              fi
+              if [ -z "$BUILD_FILE" ]; then
+                echo "ERROR: No Gradle files found at all"
+                exit 1
+              fi
+              DIR=$(dirname "$BUILD_FILE")
+              echo "Found build.gradle: $BUILD_FILE"
+            fi
           fi
+          echo "=== Android project root: $DIR ==="
+          ls -la "$DIR"
           echo "dir=$DIR" >> $GITHUB_OUTPUT
 
       - name: Native Android - Generate Gradle wrapper if missing
         if: steps.detect.outputs.type == 'native'
         run: |
           cd "${{ steps.locate.outputs.dir }}"
+          echo "=== Current directory: $(pwd) ==="
+          ls -la
           if [ ! -f "gradlew" ]; then
-            gradle wrapper --gradle-version 8.7 --distribution-type bin
+            echo "gradlew missing — generating with system gradle..."
+            gradle wrapper --gradle-version 8.7 --distribution-type bin --no-daemon
           fi
-          chmod +x gradlew
+          chmod +x gradlew || true
+          echo "=== After generation ==="
+          ls -la gradlew gradle/wrapper/ 2>/dev/null || true
 
       - name: Native Android - Build Debug APK
         if: steps.detect.outputs.type == 'native'
         run: |
           cd "${{ steps.locate.outputs.dir }}"
+          echo "Running ./gradlew assembleDebug in: $(pwd)"
           ./gradlew assembleDebug --stacktrace --no-daemon
 
       - name: Upload APK Artifact
@@ -105,6 +148,7 @@ jobs:
         with:
           name: app-apk
           path: '**/build/outputs/apk/**/*.apk'
+          if-no-files-found: warn
 
       - name: Create Release
         uses: softprops/action-gh-release@v2
