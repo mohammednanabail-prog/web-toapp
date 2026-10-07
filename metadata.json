@@ -1,0 +1,6 @@
+{
+  "name": "WebToAPK",
+  "description": "Native on-device web URL and HTML/JS/CSS to installable Android APK builder and packager.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
